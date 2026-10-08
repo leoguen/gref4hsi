@@ -24,6 +24,7 @@ import trimesh
 
 # Python standard lib
 import os
+import sys
 import time
 from datetime import datetime
 from dateutil import parser
@@ -158,8 +159,19 @@ class CameraGeometry():
                 time_concatenated = np.array(time_concatenated).astype(np.float64)
 
                 linearSphericalInterpolator = Slerp(time_concatenated, Rotation_tot)
-
-                self.rotation_nav_interpolated = linearSphericalInterpolator(time_interpolation)
+                # A camera timestamp can lie a few milliseconds beyond the
+                # single synthetic endpoint when sensors start or stop at
+                # slightly different instants. Slerp rejects out-of-range
+                # queries, so retain the extrapolated endpoint orientation
+                # for that residual interval.
+                rotation_interpolation_times = np.clip(
+                    time_interpolation,
+                    time_concatenated[0],
+                    time_concatenated[-1],
+                )
+                self.rotation_nav_interpolated = linearSphericalInterpolator(
+                    rotation_interpolation_times
+                )
 
 
 
@@ -1292,8 +1304,11 @@ def dem_2_mesh(path_dem, model_path, config, dem_ref_is_geoid = False, path_geoi
             # Automatically set
             
             
-            # Get the band's data as a NumPy array of float64 (important)
-            band_data = band.ReadAsArray().astype(np.float64)
+            # Read through Rasterio rather than GDAL's optional gdal_array
+            # extension. Some otherwise valid GDAL installations omit the
+            # compiled ``_gdal_array`` module required by ReadAsArray().
+            with rasterio.open(path_dem) as raster:
+                band_data = raster.read(1).astype(np.float64)
 
             # Create a mask to identify no-data values
             mask = band_data != no_data_value
@@ -1735,11 +1750,7 @@ def _run_delaunay_2d_in_separate_process(output_xyz):
     # Create a subprocess to run the function
     python_cmd_str = f'import pyvista as pv; import numpy as np; points = np.loadtxt(r"{output_xyz}"); points_offset = np.mean(points, axis = 0); cloud = pv.PolyData(points-points_offset); mesh = cloud.delaunay_2d(); print("delaunay_2d completed successfully")'
 
-    command = [
-    'python',
-    '-c',
-    python_cmd_str
-    ]
+    command = [sys.executable, '-c', python_cmd_str]
 
     is_working = False
 

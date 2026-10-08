@@ -1,6 +1,7 @@
 # Python Built-ins
 import os
 import glob
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from pyproj import CRS, Transformer
 
@@ -8,6 +9,7 @@ from pyproj import CRS, Transformer
 from scipy.interpolate import griddata
 import scipy.io as spio
 from scipy.interpolate import interp1d
+from scipy.signal import medfilt, savgol_filter
 import h5py
 import numpy as np
 import pandas as pd
@@ -292,14 +294,15 @@ def set_camera_model(config, config_file_path, config_uhi, model_type, binning_s
 
     # Vector from origin of body to HSI
     t_hsi_body = config_uhi.translation_body_to_hsi
-    param_dict['tz'] = t_hsi_body[0]
+    param_dict['tx'] = t_hsi_body[0]
     param_dict['ty'] = t_hsi_body[1]
     param_dict['tz'] = t_hsi_body[2]
 
     # Define where to write calibrated data
     file_name_xml = 'HSI_' + str(binning_spatial) + 'b.xml'
     CAMERA_CALIB_XML_DIR = config['Absolute Paths']['calib_folder']
-    xml_cal_write_path = CAMERA_CALIB_XML_DIR + file_name_xml
+    os.makedirs(CAMERA_CALIB_XML_DIR, exist_ok=True)
+    xml_cal_write_path = os.path.join(CAMERA_CALIB_XML_DIR, file_name_xml)
 
 
     CalibHSI(file_name_cal_xml= xml_cal_write_path,  
@@ -311,6 +314,8 @@ def set_camera_model(config, config_file_path, config_uhi, model_type, binning_s
 
     # Set value in config file and update:
     config.set('Relative Paths', 'hsi_calib_path', value = 'Input/Calib/' + file_name_xml)
+    if config.has_section('Absolute Paths'):
+        config.set('Absolute Paths', 'hsi_calib_path', value=xml_cal_write_path)
 
     with open(config_file_path, 'w') as configfile:
             config.write(configfile)
@@ -435,6 +440,155 @@ def read_nav_from_dvl_imu_alti(dvl_filename, imu_filename, alti_filename, lon0, 
     nav.altitude = TimeData(time = alti_contents['TimestampMeasured'],
                         value = alti_contents['Altitude'],
                         time_format='unix')
+    return nav
+
+
+def _sorted_unique_samples(times, values):
+    """Return finite samples sorted by time, keeping the last duplicate."""
+    times = np.asarray(times, dtype=np.float64).reshape(-1)
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    valid = np.isfinite(times) & np.isfinite(values)
+    times = times[valid]
+    values = values[valid]
+    if times.size == 0:
+        return times, values
+    order = np.argsort(times, kind='stable')
+    times = times[order]
+    values = values[order]
+    keep = np.r_[times[1:] != times[:-1], True]
+    return times[keep], values[keep]
+
+
+def read_nav_from_otter_h5(h5_filenames):
+    """Read embedded Otter/Coralis navigation and altimeter measurements.
+
+    Attitude and geographic position are read from
+    ``rawdata/navigation/external`` and ranges from
+    ``rawdata/navigation/altitude``. ``TimestampMeasured`` is used for both;
+    ``TimestampReceived`` belongs to the logger clock and is deliberately not
+    used. Samples from all supplied chunks are sorted and de-duplicated.
+    """
+    external_path = 'rawdata/navigation/external'
+    altimeter_path = 'rawdata/navigation/altitude'
+    external_fields = ('Roll', 'Pitch', 'Heading', 'Latitude', 'Longitude', 'Depth')
+    collected = {field: [[], []] for field in external_fields}
+    altitude_times = []
+    altitude_values = []
+
+    for h5_filename in map(Path, h5_filenames):
+        with h5py.File(h5_filename, 'r') as handle:
+            if external_path not in handle:
+                raise KeyError(f'{h5_filename}: missing {external_path}')
+            external = handle[external_path]
+            if 'TimestampMeasured' not in external:
+                raise KeyError(f'{h5_filename}: missing {external_path}/TimestampMeasured')
+            external_time = external['TimestampMeasured'][()]
+            for field in external_fields:
+                if field not in external:
+                    raise KeyError(f'{h5_filename}: missing {external_path}/{field}')
+                collected[field][0].append(external_time)
+                collected[field][1].append(external[field][()])
+
+            if altimeter_path not in handle:
+                raise KeyError(f'{h5_filename}: missing {altimeter_path}')
+            altimeter = handle[altimeter_path]
+            altitude_times.append(altimeter['TimestampMeasured'][()])
+            altitude_values.append(altimeter['Altitude'][()])
+
+    if not altitude_times:
+        raise ValueError('No Otter HDF5 files were supplied')
+
+    samples = {}
+    for field, (time_parts, value_parts) in collected.items():
+        samples[field] = _sorted_unique_samples(
+            np.concatenate(time_parts), np.concatenate(value_parts)
+        )
+    altitude_time, altitude = _sorted_unique_samples(
+        np.concatenate(altitude_times), np.concatenate(altitude_values)
+    )
+
+    nav = NAV()
+    nav.roll = TimeData(*samples['Roll'], time_format='unix')
+    nav.pitch = TimeData(*samples['Pitch'], time_format='unix')
+    nav.yaw = TimeData(*samples['Heading'], time_format='unix')
+    nav.lat = TimeData(*samples['Latitude'], time_format='unix')
+    nav.lon = TimeData(*samples['Longitude'], time_format='unix')
+    nav.pos_z = TimeData(*samples['Depth'], time_format='unix')
+    nav.altitude = TimeData(altitude_time, altitude, time_format='unix')
+    return nav
+
+
+def _local_polynomial_smooth(values, window_length, polyorder=2, median_window=1):
+    """Despike and locally polynomial-smooth a one-dimensional series."""
+    values = np.asarray(values, dtype=np.float64)
+    if values.size < 3:
+        return values.copy()
+
+    median_window = min(int(median_window), values.size)
+    if median_window % 2 == 0:
+        median_window -= 1
+    filtered = medfilt(values, kernel_size=median_window) if median_window >= 3 else values
+
+    window_length = min(int(window_length), values.size)
+    if window_length % 2 == 0:
+        window_length -= 1
+    if window_length <= polyorder:
+        return filtered.copy()
+    return savgol_filter(filtered, window_length=window_length, polyorder=polyorder, mode='interp')
+
+
+def smooth_otter_navigation(
+    nav,
+    lon_lat_alt_origin,
+    position_window=15,
+    heading_window=11,
+    attitude_window=7,
+    polyorder=2,
+    median_window=5,
+):
+    """Smooth Otter position and attitude before HSI-time interpolation.
+
+    Latitude/longitude are filtered as local metric north/east coordinates.
+    Heading is unwrapped before filtering to avoid discontinuities at 360
+    degrees. The supplied ``NAV`` object is updated and returned.
+    """
+    lon0, lat0, h0 = np.asarray(lon_lat_alt_origin, dtype=np.float64)
+    north, east, _ = pm.geodetic2ned(
+        lat=nav.lat.value,
+        lon=nav.lon.value,
+        h=-nav.pos_z.value,
+        lat0=lat0,
+        lon0=lon0,
+        h0=h0,
+        deg=True,
+    )
+    north = _local_polynomial_smooth(north, position_window, polyorder, median_window)
+    east = _local_polynomial_smooth(east, position_window, polyorder, median_window)
+    down = _local_polynomial_smooth(nav.pos_z.value, position_window, polyorder, median_window)
+    lat, lon, height = pm.ned2geodetic(
+        n=north,
+        e=east,
+        d=down,
+        lat0=lat0,
+        lon0=lon0,
+        h0=h0,
+        deg=True,
+    )
+    nav.lat.value = lat
+    nav.lon.value = lon
+    nav.pos_z.value = -height
+
+    heading = np.unwrap(np.deg2rad(nav.yaw.value))
+    heading = _local_polynomial_smooth(
+        heading, heading_window, polyorder, median_window
+    )
+    nav.yaw.value = np.rad2deg(heading)
+    nav.roll.value = _local_polynomial_smooth(
+        nav.roll.value, attitude_window, polyorder, median_window
+    )
+    nav.pitch.value = _local_polynomial_smooth(
+        nav.pitch.value, attitude_window, polyorder, median_window
+    )
     return nav
 
 
@@ -866,6 +1020,102 @@ def uhi_beast(config, config_uhi):
 
 
 
+def uhi_otter(config, config_uhi):
+    """Prepare Otter/Coralis HDF5 captures for the gref4hsi pipeline.
+
+    Position and attitude are read from ``rawdata/navigation/external`` and
+    ranges from ``rawdata/navigation/altitude``. Pipeline-compatible raw
+    navigation datasets, an embedded-FOV camera model, and one altimeter DEM
+    per filename-defined transect are then created.
+
+    The HDF5 files are modified in place, so use a working copy.
+    """
+    mission_path = Path(config['General']['mission_dir'])
+    config_file_path = mission_path / 'configuration.ini'
+    h5_folder = Path(config['Absolute Paths']['h5_folder'])
+    h5_files = sorted(h5_folder.glob('*.h5'))
+    if not h5_files:
+        raise FileNotFoundError(f'No .h5 files found in {h5_folder}')
+
+    h5_cube_path = config['HDF.hyperspectral']['datacube']
+    h5_timestamp_path = config['HDF.hyperspectral']['timestamp']
+    h5_fov_path = config['HDF.calibration']['fov']
+    time_offset = float(config_uhi.time_offset_sec)
+    lon0, lat0, alt0 = np.asarray(config_uhi.lon_lat_alt_origin, dtype=float)
+
+    transects = {}
+    for path in h5_files:
+        transect_name = path.stem.rsplit('_', 1)[0]
+        transects.setdefault(transect_name, []).append(path)
+
+    camera_model_written = False
+    for transect_name, transect_files in sorted(transects.items()):
+        transect_files.sort()
+        nav = read_nav_from_otter_h5(transect_files)
+        if getattr(config_uhi, 'smooth_navigation', False):
+            nav = smooth_otter_navigation(
+                nav,
+                lon_lat_alt_origin=config_uhi.lon_lat_alt_origin,
+                position_window=getattr(config_uhi, 'position_smoothing_window', 15),
+                heading_window=getattr(config_uhi, 'heading_smoothing_window', 11),
+                attitude_window=getattr(config_uhi, 'attitude_smoothing_window', 7),
+                polyorder=getattr(config_uhi, 'smoothing_polyorder', 2),
+                median_window=getattr(config_uhi, 'median_filter_window', 5),
+            )
+        hsi_timestamp_parts = []
+
+        for h5_path in transect_files:
+            with h5py.File(h5_path, 'r') as handle:
+                if h5_cube_path not in handle:
+                    raise KeyError(f'{h5_path}: missing {h5_cube_path}')
+                hsi_timestamps = handle[h5_timestamp_path][()]
+                hsi_timestamp_parts.append(hsi_timestamps)
+
+                if not camera_model_written:
+                    spatial_pixels = handle[h5_cube_path].shape[1]
+                    fov = handle[h5_fov_path][()]
+                    binning_spatial = int(np.round(1936 / spatial_pixels))
+                    set_camera_model(
+                        config=config,
+                        config_file_path=str(config_file_path),
+                        config_uhi=config_uhi,
+                        model_type='embedded',
+                        binning_spatial=binning_spatial,
+                        fov_arr=fov,
+                    )
+                    camera_model_written = True
+
+            write_nav_data_to_h5(
+                nav=nav,
+                time_offset=time_offset,
+                config=config,
+                H5_FILE_PATH=str(h5_path),
+            )
+
+        points = altimeter_data_to_point_cloud(
+            nav=nav,
+            config_uhi=config_uhi,
+            true_time_hsi=np.concatenate(hsi_timestamp_parts) - time_offset,
+            lon0=lon0,
+            lat0=lat0,
+            h0=alt0,
+        )
+        if not points.size:
+            raise ValueError(f'No altimeter samples overlap transect {transect_name}')
+
+        point_cloud_to_dem(
+            points,
+            config=config,
+            resolution_dem=float(config_uhi.resolution_dem),
+            lon0=lon0,
+            lat0=lat0,
+            h0=alt0,
+            make_per_transect=True,
+            transect_name=transect_name,
+        )
+        print(f'Prepared Otter transect {transect_name} ({len(transect_files)} file(s))')
+
+
 def uhi_dbe(config, config_uhi):
     """Preparing data for the UHI-2x blueye edition (almost copy of beast)
 
@@ -966,7 +1216,7 @@ def uhi_dbe(config, config_uhi):
 
         ## write nav data to h5 file
         write_nav_data_to_h5(nav, time_offset, config, H5_FILE_PATH)
-        
+
         # Build a point cloud
         point_cloud_altimeter = altimeter_data_to_point_cloud(nav = nav, 
                                                               config_uhi=config_uhi, 
@@ -998,8 +1248,4 @@ def uhi_dbe(config, config_uhi):
                                  resolution_dem = config_uhi.resolution_dem, 
                                  lon0=lon0, 
                                  lat0=lat0, 
-                                 h0=alt0)
-
-        
-
-        
+        h0=alt0)

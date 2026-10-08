@@ -1,4 +1,7 @@
 # gref4hsi - a toolchain for the georeferencing and orthorectification of hyperspectral pushbroom data. 
+
+> **Maintenance note:** This repository is a maintained and updated fork of the [original gref4hsi repository](https://github.com/havardlovas/gref4hsi).
+
 This software was made with a special emphasis on georeferencing and orthorectification of hyperspectral imagery from drones and underwater robots. However, it is equally simple to use for airborne data, and probably even for satellite imagery (although modified approaches including analytical ellipsoid intersection may be better). There is also a coregistration module (at beta stage) which, given an accurate RGB orthomosaic, can optimize geometric parameters (static or time-varying) to align the data.
 The functionality in bullet form is:
 * georeference.py: The software currently supports direct georeferencing through CPU-accelerated ray tracing of push broom measurements onto terrain files including 3D triangular meshes (\*.ply), 2.5D raster DEM/DSM (e.g. \*.tif) and geoid models.
@@ -286,4 +289,3 @@ coregistration.main(config_file_mission, mode='compare')
 # which is used to optimize static geometric parameters (e.g. boresight...) or dynamic geometric parameters (time-varying nav errors).
 coregistration.main(config_file_mission, mode='calibrate')
 ```
-
