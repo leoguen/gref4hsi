@@ -16,6 +16,7 @@ the findings for that dataset.
 | 2 | `02_run_sparse.py features|matches|mapper|all|status` | `workspace/database.db`, `workspace/sparse_fixed/` |
 | 3 | `03_georeference.py [--estimate-offsets] [--profile-clock]` | `metadata/navigation.csv`, `metadata/camera_offsets.json`, `metadata/aligned_poses.json` |
 | 4 | `04_create_orthomosaic.py [--resolution m] [--blend nadir|feather] [--focal px]` | `output/rgb_orthomosaic.tif` (+ `_count.tif`, `report.json`) |
+| 5 | `05_export_tracks.py` | `output/tracks/*.geojson` (antenna, corrected camera and SfM camera tracks for QGIS overlay) |
 
 ```bash
 PY=/home/leo/Documents/NTNU/PhD/UHI/gref4hsi/gref4hsi_venv/bin/python
@@ -24,6 +25,7 @@ $PY 01_extract_rgb.py --config $CFG
 $PY 02_run_sparse.py all --config $CFG
 $PY 03_georeference.py --config $CFG --estimate-offsets
 $PY 04_create_orthomosaic.py --config $CFG
+$PY 05_export_tracks.py --config $CFG
 ```
 
 ## Method in short
@@ -40,7 +42,7 @@ $PY 04_create_orthomosaic.py --config $CFG
   near-minima; `--profile-clock` prints misfit vs. clock offset so you can check that the
   chosen minimum is the deepest. Results are stored in `metadata/camera_offsets.json`
   and reused on later runs without `--estimate-offsets`.
-* **Orthomosaic.** Images are projected onto the gref4hsi DEM (`georeference.dem_path`)
+* **Orthomosaic (tiled).** Built in tiles so millimetre grids fit in memory; a coarse pass at `mosaic.stats_resolution_m` (1 cm) fixes the colour stretch and measures overlap consistency. Images are projected onto the gref4hsi DEM (`georeference.dem_path`)
   through the OPENCV camera model, after one global flat-field correction. `nadir` blend
   lets the most central image win per cell (sharp, seams visible); `feather` averages
   (smooth, blurrier) and reports `overlap_luminance_std`, a registration quality number.
