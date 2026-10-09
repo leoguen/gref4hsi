@@ -109,6 +109,22 @@ more than they are.
 8. **Vehicle behaviour.** The 30 deg yaw oscillation drives most of the trouble.
    Slower speed or better heading control on the Otter would help every step above.
 
+## Closing the loop to the hyperspectral data
+
+The RGB poses have been written into a copy of the mission
+(`gref4hsi_test_sfmpose`) as `raw/nav_rgbsfm` and gref4hsi was re-run on them with
+the HSI 5 cm behind the camera. Assumptions specific to this step:
+
+* The RGB image-up direction is the vehicle's forward axis. Check: image-up heading
+  minus compass heading is -1.1 deg median (IQR -4 to +2 deg) over 217 frames.
+* The HSI boresight from `HSI_2b.xml` (rz = -90 deg, rx = ry = 0) still applies when
+  the body frame is defined from the RGB camera. Residual boresight errors of a few
+  degrees are expected and would need the in situ luminance calibration.
+* Poses at 3 Hz are interpolated (slerp) to the ~25 Hz HSI lines. With yaw rates up to
+  30 deg/s this smooths out sub-frame motion; the navigation's attitude rates could be
+  blended in for the high-frequency part.
+* The DEM is still the altimeter surface.
+
 ## References
 
 * Løvås, H. S., Mogstad, A. A., Sørensen, A. J., Johnsen, G. (2022). A Methodology

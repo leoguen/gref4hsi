@@ -45,7 +45,7 @@ def main() -> None:
     timestamp_dataset = config["hdf5"]["rgb_timestamps"]
     quality = int(config["extraction"]["jpeg_quality"])
 
-    files = sorted(h5_dir.glob("*.h5"))
+    files = sorted(h5_dir.glob(config["paths"].get("h5_pattern", "*.h5")))  # e.g. "uhi_20241024_140601_*.h5" for one transect
     if not files:
         raise FileNotFoundError(f"No HDF5 files found in {h5_dir}")
 
