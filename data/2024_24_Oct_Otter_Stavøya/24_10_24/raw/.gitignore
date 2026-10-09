@@ -1,0 +1,3 @@
+# Keep the raw acquisition directory, but never commit its large contents.
+*
+!.gitignore
