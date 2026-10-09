@@ -46,10 +46,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--focal", type=float, default=None, help="Override focal length [px] for projection")
     parser.add_argument("--tile", type=int, default=None, help="Tile size in cells (default from config, 2048)")
+    parser.add_argument("--source", choices=("raw", "normalized"), default=None,
+                        help="Image set to mosaic: raw frames with flat field (default) or the grey-world normalised frames")
     return parser.parse_args()
 
 
-def flat_field(image_paths: list[Path], sigma: float) -> np.ndarray:
+def flat_field(image_paths: list[Path], sigma: float, vignette_threshold: float = 0.3,
+               vignette_erode_px: int = 8) -> tuple[np.ndarray, np.ndarray]:
+    """Smooth mean frame (unit mean per channel) and a per-pixel weight map.
+
+    The weight map is the distance to the edge of the usable area, normalised to 1 at
+    the frame centre. The usable area is where the mean frame is brighter than
+    ``vignette_threshold`` times its central brightness (this removes the dark
+    housing rim in the corners), eroded by a few pixels; outside it the weight is 0 so
+    those pixels never contribute to the mosaic.
+    """
     acc = None
     for p in image_paths:
         img = cv2.imread(str(p)).astype(np.float32)
@@ -58,7 +69,16 @@ def flat_field(image_paths: list[Path], sigma: float) -> np.ndarray:
     k = int(6 * sigma + 1) | 1
     field = cv2.GaussianBlur(mean, (k, k), sigma)
     field /= field.reshape(-1, 3).mean(axis=0)  # unit-mean per channel
-    return np.clip(field, 0.05, None)
+    lum = cv2.GaussianBlur(mean.mean(axis=2), (21, 21), 5)
+    H, W = lum.shape
+    centre = lum[H // 2 - H // 8:H // 2 + H // 8, W // 2 - W // 8:W // 2 + W // 8].mean()
+    usable = (lum >= vignette_threshold * centre).astype(np.uint8)
+    if vignette_erode_px > 0:
+        usable = cv2.erode(usable, np.ones((2 * vignette_erode_px + 1,) * 2, np.uint8))
+    dist = cv2.distanceTransform(usable, cv2.DIST_L2, 5)
+    weight = dist / max(dist.max(), 1.0)
+    print(f"usable image area {usable.mean() * 100:.1f}% (vignette threshold {vignette_threshold} x centre brightness)")
+    return np.clip(field, 0.05, None), weight.astype(np.float32)
 
 
 def sample_image(img: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -75,7 +95,8 @@ def sample_image(img: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
 class Mosaic:
     """Grid definition plus the per-tile accumulation."""
 
-    def __init__(self, bounds_local, res, origin, epsg, dem_path, views, image_dir, field, blend, feather_power):
+    def __init__(self, bounds_local, res, origin, epsg, dem_path, views, image_dir, field, weight_map, blend,
+                 feather_power):
         self.xmin, self.ymin, self.xmax, self.ymax = bounds_local
         self.res = res
         self.origin, self.epsg = origin, epsg
@@ -84,7 +105,7 @@ class Mosaic:
         self.transform = from_origin(self.xmin + origin[0], self.ymax + origin[1], res, res)
         self.dem_path = dem_path
         self.views = views
-        self.image_dir, self.field = image_dir, field
+        self.image_dir, self.field, self.weight_map = image_dir, field, weight_map
         self.blend, self.feather_power = blend, feather_power
         # per-image candidate window in grid cells (camera nadir +- search radius)
         self.boxes = []
@@ -151,10 +172,15 @@ class Mosaic:
             img = image_cache[img_name]
             u, v = uv[inside, 0].astype(np.float32), uv[inside, 1].astype(np.float32)
             col = sample_image(img, u, v)
-            border = np.minimum(np.minimum(u, W - 1 - u) / (W / 2), np.minimum(v, H - 1 - v) / (H / 2))
-            wgt = np.clip(border, 1e-3, 1) ** self.feather_power
+            # weight: distance to the edge of the usable (non-vignetted) area, 0 outside it
+            wmap = self.weight_map[np.clip(np.rint(v).astype(int), 0, H - 1), np.clip(np.rint(u).astype(int), 0, W - 1)]
+            keep = wmap > 0
+            if not keep.any():
+                continue
+            col, u, v, wmap = col[keep], u[keep], v[keep], wmap[keep]
+            wgt = np.clip(wmap, 1e-3, 1) ** self.feather_power
             rows, cols = np.nonzero(valid)
-            rows, cols = rows[front][inside] + (ir0 - r0), cols[front][inside] + (ic0 - c0)
+            rows, cols = rows[front][inside][keep] + (ir0 - r0), cols[front][inside][keep] + (ic0 - c0)
             lum = col.mean(axis=1)
             np.add.at(acc2, (rows, cols), wgt * lum ** 2)
             np.add.at(count, (rows, cols), 1)
@@ -197,7 +223,12 @@ def main() -> None:
     feather_power = float(mosaic_cfg.get("feather_power", 2.0))
     search_radius = float(mosaic_cfg.get("search_radius_m", 2.5))
     tile = args.tile or int(mosaic_cfg.get("tile_cells", 2048))
-    image_dir = geo.resolve(root, paths["image_dir"])
+    source = args.source or mosaic_cfg.get("image_source", "raw")
+    if source == "normalized":
+        image_dir = geo.resolve(root, paths.get("colmap_image_dir", "images/normalized"))
+        args.no_flatfield = True  # the normalisation already removed the illumination pattern
+    else:
+        image_dir = geo.resolve(root, paths["image_dir"])
     dem_path = geo.resolve(root, config["georeference"]["dem_path"])
     origin_info = json.loads((root / "metadata/local_origin.json").read_text())
     origin, epsg = np.array(origin_info["origin"]), int(origin_info["epsg"])
@@ -227,21 +258,25 @@ def main() -> None:
     if not views:
         raise SystemExit("No aligned images found")
     views.sort(key=lambda v: v[0])
-    print(f"{len(views)} registered images from models {use}; blend {blend}; focal {views[0][2]['params'][0]:.1f} px")
+    print(f"{len(views)} registered images from models {use}; blend {blend}; focal {views[0][2]['params'][0]:.1f} px; "
+          f"source {source} ({image_dir.name})")
 
     # --- flat field ---------------------------------------------------------
     all_images = sorted(image_dir.glob("*.jpg"))
+    field, weight_map = flat_field(all_images, float(mosaic_cfg.get("flatfield_sigma_px", 60)),
+                                   float(mosaic_cfg.get("vignette_threshold", 0.3)),
+                                   int(mosaic_cfg.get("vignette_erode_px", 8)))
     if args.no_flatfield:
         field = np.ones((1, 1, 3), np.float32)
     else:
-        field = flat_field(all_images, float(mosaic_cfg.get("flatfield_sigma_px", 60)))
         cv2.imwrite(str(out_dir / "flatfield.png"), np.clip(field / field.max() * 255, 0, 255).astype(np.uint8))
+    cv2.imwrite(str(out_dir / "pixel_weight.png"), (weight_map * 255).astype(np.uint8))
 
     centers = np.array([v[1]["center"] for v in views])
     bounds = (centers[:, 0].min() - search_radius, centers[:, 1].min() - search_radius,
               centers[:, 0].max() + search_radius, centers[:, 1].max() + search_radius)
     common = dict(origin=origin, epsg=epsg, dem_path=dem_path, views=views, image_dir=image_dir, field=field,
-                  blend=blend, feather_power=feather_power)
+                  weight_map=weight_map, blend=blend, feather_power=feather_power)
 
     # --- pass 1: coarse statistics (colour stretch, overlap consistency) -----
     coarse = Mosaic(bounds, stats_res, **common)
@@ -297,6 +332,7 @@ def main() -> None:
         dst.update_tags(blend=blend, resolution_m=res, images=len(views), models=",".join(use),
                         local_origin=json.dumps(origin.tolist()))
     summary = {"output": str(output), "images": len(views), "models": use, "resolution_m": res, "blend": blend,
+               "image_source": source,
                "covered_cells": covered_cells, "covered_area_m2": float(covered_cells * res * res),
                "grid": [fine.width, fine.height], "stretch_low": lo.tolist(), "stretch_high": hi.tolist(),
                "overlap_luminance_std": overlap_std, "stats_resolution_m": stats_res,

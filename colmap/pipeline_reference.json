@@ -8,14 +8,23 @@
     "dense_dir": "workspace/dense",
     "sparse_fixed_dir": "workspace/sparse_fixed",
     "aligned_dir": "workspace/aligned",
-    "h5_pattern": "*.h5"
+    "h5_pattern": "*.h5",
+    "colmap_image_dir": "images/normalized",
+    "mask_dir": "images/masks"
   },
   "hdf5": {
     "rgb_frames": "rawdata/rgb/rgbFrames",
     "rgb_timestamps": "rawdata/rgb/timestamp"
   },
   "extraction": {
-    "jpeg_quality": 95
+    "jpeg_quality": 95,
+    "normalize": true,
+    "normalize_target_mean": 110.0,
+    "normalize_target_std": 40.0,
+    "normalize_stats_sigma_px": 5,
+    "normalize_min_std": 2.0,
+    "vignette_threshold": 0.3,
+    "vignette_erode_px": 8
   },
   "colmap": {
     "camera_model": "OPENCV",
@@ -84,6 +93,8 @@
     "filename": "rgb_orthomosaic.tif",
     "stretch": "common",
     "focal_override_px": 605.0,
-    "blend_note": "nadir = sharpest image wins per cell (recommended); feather = weighted average, smears with residual misregistration and moving seaweed, but gives the overlap_luminance_std diagnostic"
+    "blend_note": "nadir = sharpest image wins per cell (recommended); feather = weighted average, smears with residual misregistration and moving seaweed, but gives the overlap_luminance_std diagnostic",
+    "vignette_threshold": 0.3,
+    "vignette_erode_px": 8
   }
 }

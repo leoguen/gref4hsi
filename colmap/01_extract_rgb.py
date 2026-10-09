@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Extract a chronological RGB image sequence from the mission HDF5 chunks."""
+"""Extract a chronological RGB image sequence from the mission HDF5 chunks.
+
+Optionally (``extraction.normalize = true``) also writes a second image set for COLMAP:
+a per-pixel grey-world normalisation (Løvås et al. 2022, eq. 9: every pixel position
+and channel is standardised with its mean and standard deviation over the whole
+transect, then mapped to a common target mean/std) plus a feature mask that blanks
+the dark housing rim. The raw frames stay in ``images/extracted`` for the mosaic.
+"""
 
 from __future__ import annotations
 
@@ -120,6 +127,53 @@ def main() -> None:
     print(f"Images: {image_dir}")
     print(f"Manifest: {manifest_path}")
     print(f"Written: {written}; already present: {skipped}")
+
+    if config["extraction"].get("normalize", False):
+        normalize_images(config, root, image_dir, quality)
+
+
+def normalize_images(config: dict, root: Path, image_dir: Path, quality: int) -> None:
+    """Per-pixel grey-world normalisation and vignette mask for feature matching."""
+    import cv2
+
+    ex = config["extraction"]
+    out_dir = resolve(root, config["paths"].get("colmap_image_dir", "images/normalized"))
+    mask_dir = resolve(root, config["paths"].get("mask_dir", "images/masks"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    files = sorted(image_dir.glob("*.jpg"))
+    stack = np.stack([cv2.imread(str(f)).astype(np.float32) for f in files])  # N,H,W,3 (BGR)
+    mu = stack.mean(axis=0)
+    sd = stack.std(axis=0)
+    sigma_px = float(ex.get("normalize_stats_sigma_px", 5))
+    if sigma_px > 0:  # smooth the statistics so fixed-pattern noise is not amplified
+        k = int(6 * sigma_px + 1) | 1
+        mu = cv2.GaussianBlur(mu, (k, k), sigma_px)
+        sd = cv2.GaussianBlur(sd, (k, k), sigma_px)
+    sd = np.maximum(sd, float(ex.get("normalize_min_std", 2.0)))
+    target_mean = float(ex.get("normalize_target_mean", 110.0))
+    target_std = float(ex.get("normalize_target_std", 40.0))
+
+    # usable area: mean luminance above a fraction of the central brightness, eroded
+    lum = cv2.GaussianBlur(mu.mean(axis=2), (21, 21), 5)
+    H, W = lum.shape
+    centre = lum[H // 2 - H // 8:H // 2 + H // 8, W // 2 - W // 8:W // 2 + W // 8].mean()
+    usable = (lum >= float(ex.get("vignette_threshold", 0.3)) * centre).astype(np.uint8)
+    erode = int(ex.get("vignette_erode_px", 8))
+    if erode > 0:
+        usable = cv2.erode(usable, np.ones((2 * erode + 1,) * 2, np.uint8))
+    mask = usable * 255
+
+    for f, img in zip(files, stack):
+        out = (img - mu) / sd * target_std + target_mean
+        out[usable == 0] = 0
+        cv2.imwrite(str(out_dir / f.name), np.clip(out, 0, 255).astype(np.uint8),
+                    [cv2.IMWRITE_JPEG_QUALITY, quality])
+        cv2.imwrite(str(mask_dir / (f.name + ".png")), mask)  # COLMAP: <image name>.png, 0 = ignore
+    cv2.imwrite(str(mask_dir.parent / "normalize_mean.png"), np.clip(mu, 0, 255).astype(np.uint8))
+    print(f"Normalised images: {out_dir} ({len(files)} files, target mean {target_mean}, std {target_std}, "
+          f"stats smoothed sigma {sigma_px} px)")
+    print(f"Feature masks: {mask_dir} (usable area {usable.mean() * 100:.1f}%)")
 
 
 if __name__ == "__main__":

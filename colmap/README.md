@@ -12,10 +12,10 @@ the findings for that dataset.
 
 | Stage | Script | Writes (inside `<mission>/colmap/`) |
 |---|---|---|
-| 1 | `01_extract_rgb.py` | `images/extracted/*.jpg`, `metadata/frames.csv` |
+| 1 | `01_extract_rgb.py` | `images/extracted/*.jpg` (raw, used by the mosaic), `images/normalized/*.jpg` + `images/masks/*.png` (grey-world normalised frames and vignette masks, used by COLMAP when `extraction.normalize` is true), `metadata/frames.csv` |
 | 2 | `02_run_sparse.py features|matches|mapper|all|status` | `workspace/database.db`, `workspace/sparse_fixed/` |
 | 3 | `03_georeference.py [--estimate-offsets] [--profile-clock]` | `metadata/navigation.csv`, `metadata/camera_offsets.json`, `metadata/aligned_poses.json` |
-| 4 | `04_create_orthomosaic.py [--resolution m] [--blend nadir|feather] [--focal px]` | `output/rgb_orthomosaic.tif` (+ `_count.tif`, `report.json`) |
+| 4 | `04_create_orthomosaic.py [--resolution m] [--blend nadir|feather] [--focal px] [--source raw|normalized]` | `output/rgb_orthomosaic.tif` (+ `_count.tif`, `report.json`) |
 | 5 | `05_export_tracks.py` | `output/tracks/*.geojson` (antenna, corrected camera and SfM camera tracks for QGIS overlay) |
 | 6 | `06_export_poses_to_h5.py --h5-dir <mission>/Input/H5` | `raw/nav_rgbsfm/{position_ecef,euler_angles,timestamp}` in each H5, `metadata/poses_body_ned.csv` |
 | 7 | `07_run_gref4hsi.py --config <mission>/configuration.ini` | gref4hsi pose/georeference/orthorectify outputs of that mission |
@@ -54,6 +54,15 @@ luminance-correlation calibration (paper, method 2) would refine it.
 
 ## Method in short
 
+* **Grey-world normalisation for matching** (`extraction.normalize`, default on). Every
+  pixel position and channel is standardised with its mean and standard deviation over
+  the whole transect (Løvås et al. 2022, eq. 9) and mapped to a common target; the dark
+  housing rim is blanked and handed to COLMAP as a feature mask. On the pilot transect
+  this gave 4x more keypoints (6200 vs 1450 per frame) and 2.6x more inliers between
+  neighbours (1630 vs 630, weakest pair 39 vs 20) at the cost of ~2x matching time.
+  Poses, offsets and overlap consistency came out identical, so the gain is robustness,
+  not accuracy. The mosaic always uses the raw frames with its own flat field.
+
 * **SfM with fixed intrinsics.** Self-calibration diverges on a flat seabed under
   forward motion, so the camera model is held fixed (`colmap.refine_intrinsics = false`).
 * **Sliding-window georeferencing.** The incremental model drifts in scale and bends
@@ -67,7 +76,7 @@ luminance-correlation calibration (paper, method 2) would refine it.
   chosen minimum is the deepest. Results are stored in `metadata/camera_offsets.json`
   and reused on later runs without `--estimate-offsets`.
 * **Orthomosaic (tiled).** Built in tiles so millimetre grids fit in memory; a coarse pass at `mosaic.stats_resolution_m` (1 cm) fixes the colour stretch and measures overlap consistency. Images are projected onto the gref4hsi DEM (`georeference.dem_path`)
-  through the OPENCV camera model, after one global flat-field correction. `nadir` blend
+  through the OPENCV camera model, after one global flat-field correction. Pixels in the dark housing rim (mean frame below `mosaic.vignette_threshold` x centre brightness, eroded by `vignette_erode_px`) get zero weight and never enter the mosaic; the blending weight is the distance to the edge of that usable area. `nadir` blend
   lets the most central image win per cell (sharp, seams visible); `feather` averages
   (smooth, blurrier) and reports `overlap_luminance_std`, a registration quality number.
   `mosaic.focal_override_px` lets the projection use a different focal length than SfM.

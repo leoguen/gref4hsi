@@ -76,7 +76,8 @@ def main() -> None:
     with config_path.open(encoding="utf-8") as stream:
         config = json.load(stream)
     root = config_path.parents[1]
-    image_dir = resolve(root, config["paths"]["image_dir"])
+    image_dir = resolve(root, config["paths"].get("colmap_image_dir", config["paths"]["image_dir"]))
+    mask_dir = resolve(root, config["paths"]["mask_dir"]) if config["paths"].get("mask_dir") else None
     database = resolve(root, config["paths"]["database"])
     options = config["colmap"]
     refine = bool(options.get("refine_intrinsics", True))
@@ -108,6 +109,7 @@ def main() -> None:
                 "--ImageReader.camera_model", str(options["camera_model"]),
                 "--ImageReader.camera_params", camera_params,
                 "--ImageReader.single_camera", "1" if options["single_camera"] else "0",
+            ] + (["--ImageReader.mask_path", str(mask_dir)] if mask_dir and mask_dir.exists() else []) + [
                 "--SiftExtraction.use_gpu", "1" if options["use_gpu"] else "0",
                 "--SiftExtraction.num_threads", str(options.get("num_threads", 4)),
             ],

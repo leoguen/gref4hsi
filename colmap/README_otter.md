@@ -68,7 +68,12 @@ more than they are.
    modelled; a 10 cm height error at the frame edge displaces that pixel by about
    5 cm on the ground.
 
-7. **One global flat-field and one global colour stretch.** The flat field is the
+7. **Image preprocessing.** COLMAP sees grey-world normalised frames (per-pixel
+   statistics over the transect) with the housing rim masked; the mosaic uses the raw
+   frames. On this transect the normalisation quadrupled the keypoints and more than
+   doubled the inliers but changed neither the poses nor the estimated offsets (forward
+   -0.688 vs -0.694 m, clock 1.501 vs 1.505 s), a useful reproducibility check.
+   **One global flat-field and one global colour stretch.** The flat field is the
    heavily smoothed mean of all frames; the stretch is common to all channels so
    colour ratios are preserved. No water-column correction.
 
@@ -124,6 +129,52 @@ the HSI 5 cm behind the camera. Assumptions specific to this step:
   30 deg/s this smooths out sub-frame motion; the navigation's attitude rates could be
   blended in for the high-frequency part.
 * The DEM is still the altimeter surface.
+
+## Open issue: HSI and RGB products do not coincide (not worked on yet)
+
+After the loop closure, the hyperspectral composite and the RGB mosaic follow the
+same strip but are offset against each other: the HSI strip sits to one side of the
+RGB strip and a sea urchin visible in both appears about half a swath apart. Both
+products use the same camera poses, so the pose is not the cause. Candidates, most
+likely first:
+
+1. **Mirrored HSI slit.** The boresight in `HSI_2b.xml` (rz = -90 deg) came from the
+   vehicle-frame preprocessing; with the body frame defined from the RGB camera the
+   sign may be wrong, which flips left and right across the track.
+2. **Roll/pitch tilt of the HSI relative to the camera** (rx, ry are 0 in the
+   calibration file). ~2 cm of swath shift per degree at 1.2 m altitude.
+3. **Clock offset between HSI lines and RGB frames.** Both are on the UHI clock, but
+   the timestamps may mark different moments of the exposure/readout; 1 s = 45 cm
+   along track.
+4. Not likely: the 5 cm lever arm, the shared DEM, a 180 deg mounting error (the
+   image-up heading matches the compass heading to ~1 deg).
+
+Planned test: cross-correlate the two rasters along the strip and split the shift
+into along-track and across-track parts using the heading. A sign change across the
+strip means a mirror, a constant across-track part a tilt, an along-track part a
+clock offset. Then re-run gref4hsi (~4 min) with the corrected boresight sign/tilt or
+clock offset to confirm. Still open: in the raw RGB frames, does the seabed move
+down the image when the vehicle moves forward (i.e. is image-up really forward)?
+
+## Altitude check: SfM versus altimeter (measured, not acted on)
+
+Per-frame camera height above the SfM seabed points (horizontal scale from the
+navigation, f = 487 px) against the 1 Hz altimeter, over the whole transect:
+
+| Quantity | Value |
+|---|---|
+| Altimeter | 1.17 to 1.29 m, std 3 cm |
+| SfM height above points | median 1.35 m, std 11 cm |
+| Ratio SfM / altimeter | median 1.08, 20-frame block means 1.02 to 1.14 |
+| Difference SfM - altimeter | median +10 cm |
+| Correlation with window scale | 0.01 (not an alignment artefact) |
+
+Reading: a constant ~8 % (10 cm) offset, i.e. either the focal length is ~8 % too
+high (~450 px) or the altimeter sits ~10 cm below the camera. The SfM scatter (11 cm)
+is four times the altimeter variation, so terrain or kelp-canopy effects cannot be
+separated on this transect. The effect scales the swaths about their centrelines by
+a few centimetres at the edges and does not explain the HSI/RGB offset above. No
+correction applied; revisit together with the focal-length calibration.
 
 ## References
 
