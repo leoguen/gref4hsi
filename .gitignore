@@ -5,3 +5,5 @@ data/world/geoids/egm08_25.gtx
 gref4hsi_venv/
 helperscripts/ecotone/output/
 gref4hsi.egg-info/
+sigma_jobs/*
+results/

@@ -31,6 +31,24 @@ def resolve(base: Path, value: str) -> Path:
     return path if path.is_absolute() else (base / path).resolve()
 
 
+def grayworld_stretch(frame: np.ndarray, low_pct: float = 1.0, high_pct: float = 99.5, max_gain: float = 16.0) -> np.ndarray:
+    """Gray-world white balance followed by a percentile contrast stretch (dark underwater frames).
+
+    Statistics ignore the black vignette/border pixels. The stretch gain is capped to keep sensor noise in check."""
+    img = frame.astype(np.float32)
+    valid = img.max(axis=2) > 3
+    if valid.sum() < 100:
+        return frame
+    means = img[valid].mean(axis=0)
+    img *= (means.mean() / np.maximum(means, 1e-3))[None, None, :]
+    lum = img.mean(axis=2)[valid]
+    lo, hi = np.percentile(lum, [low_pct, high_pct])
+    gain = min(255.0 / max(hi - lo, 1.0), max_gain)
+    img = (img - lo) * gain
+    img[~valid] = 0
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True,
@@ -51,8 +69,11 @@ def main() -> None:
     frame_dataset = config["hdf5"]["rgb_frames"]
     timestamp_dataset = config["hdf5"]["rgb_timestamps"]
     quality = int(config["extraction"]["jpeg_quality"])
+    enhance = config["extraction"].get("enhance")   # optional: "grayworld"
 
-    files = sorted(h5_dir.glob(config["paths"].get("h5_pattern", "*.h5")))  # e.g. "uhi_20241024_140601_*.h5" for one transect
+    patterns = config["paths"].get("h5_pattern", "*.h5")  # e.g. "uhi_20241024_140601_*.h5" for one transect, or a list for several
+    patterns = [patterns] if isinstance(patterns, str) else patterns
+    files = sorted({path for pattern in patterns for path in h5_dir.glob(pattern)})
     if not files:
         raise FileNotFoundError(f"No HDF5 files found in {h5_dir}")
 
@@ -107,7 +128,7 @@ def main() -> None:
                         skipped += 1
                     else:
                         temporary_image = destination.with_suffix(".jpg.tmp")
-                        Image.fromarray(frames[source_frame], mode="RGB").save(
+                        Image.fromarray(grayworld_stretch(frames[source_frame]) if enhance == "grayworld" else frames[source_frame], mode="RGB").save(
                             temporary_image, format="JPEG", quality=quality, subsampling=0
                         )
                         os.replace(temporary_image, destination)

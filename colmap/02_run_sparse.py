@@ -88,6 +88,10 @@ def main() -> None:
     colmap = shutil.which("colmap")
     if colmap is None:
         raise FileNotFoundError("COLMAP is not available on PATH")
+    # COLMAP 3.13 renamed SiftExtraction/SiftMatching use_gpu and num_threads to FeatureExtraction/FeatureMatching
+    help_text = subprocess.run([colmap, "feature_extractor", "-h"], capture_output=True, text=True)
+    new_names = "FeatureExtraction.use_gpu" in help_text.stdout + help_text.stderr
+    extract_prefix, match_prefix = ("FeatureExtraction", "FeatureMatching") if new_names else ("SiftExtraction", "SiftMatching")
     image_count = len(list(image_dir.glob("*.jpg")))
     if image_count == 0:
         raise FileNotFoundError(f"No JPEG images found in {image_dir}")
@@ -109,9 +113,8 @@ def main() -> None:
                 "--ImageReader.camera_model", str(options["camera_model"]),
                 "--ImageReader.camera_params", camera_params,
                 "--ImageReader.single_camera", "1" if options["single_camera"] else "0",
-            ] + (["--ImageReader.mask_path", str(mask_dir)] if mask_dir and mask_dir.exists() else []) + [
-                "--SiftExtraction.use_gpu", "1" if options["use_gpu"] else "0",
-                "--SiftExtraction.num_threads", str(options.get("num_threads", 4)),
+                f"--{extract_prefix}.use_gpu", "1" if options["use_gpu"] else "0",
+                f"--{extract_prefix}.num_threads", str(options.get("num_threads", 4)),
             ],
             logs / "02_features.log",
         )
@@ -122,8 +125,8 @@ def main() -> None:
             [
                 colmap, "sequential_matcher",
                 "--database_path", str(database),
-                "--SiftMatching.use_gpu", "1" if options["use_gpu"] else "0",
-                "--SiftMatching.num_threads", str(options.get("num_threads", 4)),
+                f"--{match_prefix}.use_gpu", "1" if options["use_gpu"] else "0",
+                f"--{match_prefix}.num_threads", str(options.get("num_threads", 4)),
                 "--SequentialMatching.overlap", str(options["sequential_overlap"]),
             ],
             logs / "03_matches.log",
